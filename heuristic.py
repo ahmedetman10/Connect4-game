@@ -211,7 +211,10 @@ class BoardEvaluator:
                 threat_score += th
                 gravity_score += gr
 
-        # center
+        # there is a trick here in tuning the model >> as we should make a balance in the AI thinking
+        ## if the positional weight was too large >> this will make it very obseesed with playing in that
+        # positon even if the opponent will win 
+        ## and if it was zero >> the model here will not consider the importance of the center
         pos_weights = self._get_positional_weights(rows, cols)
         positional_score = 0
         for r in range(rows):
@@ -232,5 +235,5 @@ class BoardEvaluator:
         }
 
     def evaluate(self, board: Connect4Board) -> int:
-        """Return the scalar heuristic value of `board` for Minimax."""
+        
         return self.evaluate_detailed(board)["total"]
