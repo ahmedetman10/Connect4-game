@@ -99,26 +99,26 @@ class Connect4Board:
         self.total_moves -= 1
         return col, player
 
-    ## using the previous 2 functions 
+    ## using the previous 2 functions Min-Max here is very efficient
+    ## as we make the move and undo it in O(1) operations instead of 
+    ## making a new board for each option
     
 
     def is_full(self) -> bool:
-        """Return True when every cell on the board is occupied (terminal state)."""
+    
         return self.total_moves >= self.rows * self.cols
 
     def count_fours(self, player: int) -> int:
-        """
-        Count all overlapping 4-in-a-row segments owned by `player`
-        across horizontal, vertical, ascending diagonal (/), and descending diagonal (\\).
-        """
+
         grid = self.grid
         rows, cols = self.rows, self.cols
         count = 0
 
-        # 1. Horizontal windows
+        # horizontall
         for r in range(rows):
             row_cells = grid[r]
             for c in range(cols - 3):
+                # this is imp to not exceed the bounary
                 if (
                     row_cells[c] == player
                     and row_cells[c + 1] == player
@@ -127,7 +127,7 @@ class Connect4Board:
                 ):
                     count += 1
 
-        # 2. Vertical windows
+        # vertical
         for c in range(cols):
             for r in range(rows - 3):
                 if (
@@ -138,7 +138,7 @@ class Connect4Board:
                 ):
                     count += 1
 
-        # 3. Positive-slope diagonal (/)
+        # diagonal(/)
         for r in range(rows - 3):
             for c in range(cols - 3):
                 if (
@@ -149,8 +149,9 @@ class Connect4Board:
                 ):
                     count += 1
 
-        # 4. Negative-slope diagonal (\)
+        # diagonally(\)
         for r in range(3, rows):
+            # we start with row= 3 as we subtract 3
             for c in range(cols - 3):
                 if (
                     grid[r][c] == player
@@ -163,15 +164,11 @@ class Connect4Board:
         return count
 
     def get_scores(self) -> Tuple[int, int]:
-        """Return (human_score, ai_score) as counts of connected-fours."""
+
         return self.count_fours(HUMAN), self.count_fours(AI)
 
     def get_winner(self) -> Optional[str]:
-        """
-        Determine the winner once the board is full.
 
-        Returns 'Human', 'AI', 'Draw', or None if the game is still ongoing.
-        """
         if not self.is_full():
             return None
         human_score, ai_score = self.get_scores()
@@ -182,10 +179,12 @@ class Connect4Board:
         return "Draw"
 
     def clone(self) -> "Connect4Board":
-        """Create a fast independent copy of the board for search simulation."""
+
         copy_board = Connect4Board(self.rows, self.cols)
         copy_board.grid = [row[:] for row in self.grid]
         copy_board.col_heights = self.col_heights[:]
+        ## this is deep copy not referecne copy
+
         copy_board.total_moves = self.total_moves
         copy_board.move_history = self.move_history[:]
         return copy_board
@@ -198,7 +197,7 @@ class Connect4Board:
         return [row[:] for row in self.grid]
 
     def render_ascii(self, human_symbol: str = "X", ai_symbol: str = "O") -> str:
-        """Render the board top-to-bottom as a clean ASCII string for the console."""
+
         symbols = {EMPTY: ".", HUMAN: human_symbol, AI: ai_symbol}
         lines = []
         for r in range(self.rows - 1, -1, -1):

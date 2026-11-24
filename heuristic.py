@@ -1,10 +1,6 @@
 """
-Multi-Factor Heuristic Evaluation Function for Connect 4.
 
-Designed for the full-board Connect 4 variant (play until the board is full;
-winner has the greater number of connected-fours).
-
-Returns larger positive numbers when the AI is in a stronger position and
+returns larger positive numbers when the AI is in a stronger position and
 smaller (more negative) numbers when the human player is nearer to winning.
 """
 
@@ -17,24 +13,23 @@ class BoardEvaluator:
     Evaluates non-terminal Connect 4 board states using four weighted factors:
 
     1. Completed Connect-4 Differential:
-       Directly reflects the actual game objective (total connected-fours).
+       Directly reflects the actual game objective (total connected-fours)
     2. Four-Cell Window Threat Analysis:
        Scores every horizontal, vertical, and diagonal 4-cell window that is
-       unblocked by the opponent (3-in-a-row threats and 2-in-a-row setups).
+       unblocked by the opponent (3-in-a-row threats and 2-in-a-row setups)
        Opponent 3-in-a-row threats receive slightly higher defensive weight so
-       the AI prioritizes blocking imminent opponent points.
+       the AI prioritizes blocking imminent opponent points
     3. Immediate Playability (Gravity) Bonus:
        A 3-in-a-row window whose missing cell is immediately playable
-       (`col_heights[c] == r`) is significantly more urgent than one floating
-       above empty cells.
+       is significantly more urgent than one floating above empty cells
     4. Dynamic Positional Weight Matrix:
        Every cell (r, c) is weighted by the exact number of 4-cell windows that
        pass through it (center cells participate in up to 13 windows on a 6x7
-       board, whereas corners participate in only 3). Works for any rows >= 6,
-       cols >= 7.
+       board, whereas corners participate in only 3)
+       Works for any rows >= 6, cols >= 7
     """
 
-    # Tuned weights (larger = better for AI)
+    # weights (larger = better for AI)
     WEIGHT_COMPLETED_FOUR = 1000
     WEIGHT_AI_THREE = 55
     WEIGHT_AI_THREE_IMMEDIATE = 35
@@ -43,42 +38,48 @@ class BoardEvaluator:
     WEIGHT_AI_TWO = 12
     WEIGHT_OPP_TWO = -14
     WEIGHT_POSITIONAL = 2
+    # here we are making the human threats larger 
+    # to make the AI more defensive which means preventig the heman from connecting
+    # the 4 is more imp than hading for the four
 
     def __init__(self, ai_player: int = AI, opp_player: int = HUMAN) -> None:
         self.ai_player = ai_player
         self.opp_player = opp_player
         self._pos_matrix_cache: Dict[Tuple[int, int], List[List[int]]] = {}
+        # cahce for recording the position evaluations
 
     def _get_positional_weights(self, rows: int, cols: int) -> List[List[int]]:
-        """
-        Compute (and cache) how many 4-cell windows pass through each cell.
-        Center columns and middle rows naturally receive the highest values.
-        """
+  
         key = (rows, cols)
         if key in self._pos_matrix_cache:
             return self._pos_matrix_cache[key]
 
         weights = [[0] * cols for _ in range(rows)]
 
-        # Horizontal windows
+        # the idea here that we compute the number of possible connected
+        # four lines that include this cell , and we save the weights for
+        # every dimension we compute to not need to recompute
+        # the corners>> 3 , the midlle>> 13
+
+        # horizontal
         for r in range(rows):
             for c in range(cols - 3):
                 for k in range(4):
                     weights[r][c + k] += 1
 
-        # Vertical windows
+        # vertical
         for c in range(cols):
             for r in range(rows - 3):
                 for k in range(4):
                     weights[r + k][c] += 1
 
-        # Positive diagonal (/)
+        # diagonal (/)
         for r in range(rows - 3):
             for c in range(cols - 3):
                 for k in range(4):
                     weights[r + k][c + k] += 1
 
-        # Negative diagonal (\)
+        # diagonal (\)
         for r in range(3, rows):
             for c in range(cols - 3):
                 for k in range(4):
