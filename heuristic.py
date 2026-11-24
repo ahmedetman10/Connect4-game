@@ -95,9 +95,9 @@ class BoardEvaluator:
         col_heights: List[int],
     ) -> Tuple[int, int, int]:
         """
-        Evaluate a single 4-cell window.
+        Evaluate a single 4-cell window
 
-        Returns (completed_four_score, threat_score, gravity_bonus).
+        Returns (completed_four_score, threat_score, gravity_bonus)
         """
         ai_count = 0
         opp_count = 0
@@ -130,6 +130,9 @@ class BoardEvaluator:
             gravity = self.WEIGHT_OPP_THREE_IMMEDIATE if col_heights[c] == r else 0
             return 0, self.WEIGHT_OPP_THREE, gravity
 
+            # gravity here tells us whether we can play in the cell or 
+            # we should fille the under cells first
+
         if ai_count == 2:
             return 0, self.WEIGHT_AI_TWO, 0
         if opp_count == 2:
@@ -139,8 +142,7 @@ class BoardEvaluator:
 
     def evaluate_detailed(self, board: Connect4Board) -> Dict[str, int]:
         """
-        Compute the heuristic score along with a per-factor breakdown.
-        Useful for console output, debugging, and GUI display.
+        Compute the heuristic score along
         """
         grid = board.grid
         rows, cols = board.rows, board.cols
@@ -150,7 +152,7 @@ class BoardEvaluator:
         threat_score = 0
         gravity_score = 0
 
-        # 1. Horizontal windows
+        #Horizontall
         for r in range(rows):
             row_cells = grid[r]
             for c in range(cols - 3):
@@ -163,7 +165,7 @@ class BoardEvaluator:
                 threat_score += th
                 gravity_score += gr
 
-        # 2. Vertical windows
+        #vertical
         for c in range(cols):
             for r in range(rows - 3):
                 c4, th, gr = self._score_window(
@@ -175,7 +177,7 @@ class BoardEvaluator:
                 threat_score += th
                 gravity_score += gr
 
-        # 3. Positive-slope diagonal (/)
+        #diagonal(/)
         for r in range(rows - 3):
             for c in range(cols - 3):
                 c4, th, gr = self._score_window(
@@ -192,7 +194,7 @@ class BoardEvaluator:
                 threat_score += th
                 gravity_score += gr
 
-        # 4. Negative-slope diagonal (\)
+        # diagonal(\)
         for r in range(3, rows):
             for c in range(cols - 3):
                 c4, th, gr = self._score_window(
@@ -209,7 +211,7 @@ class BoardEvaluator:
                 threat_score += th
                 gravity_score += gr
 
-        # 5. Positional / center-control differential
+        # center
         pos_weights = self._get_positional_weights(rows, cols)
         positional_score = 0
         for r in range(rows):
