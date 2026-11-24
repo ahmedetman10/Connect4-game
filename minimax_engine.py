@@ -1,13 +1,4 @@
-"""
-Minimax Search Engine with Alpha-Beta Pruning and Tree Tracing.
 
-Implements:
-- Minimax with Alpha-Beta Pruning (required by Assignment 2)
-- Plain Minimax without pruning (optional toggle for benchmark comparison)
-- Structured Minimax Tree recording for both readable console printing
-  (with explicit heuristic board values at every evaluated leaf) and
-  JSON serialization for GUI tree visualization (bonus feature).
-"""
 
 from dataclasses import dataclass, field
 import math

@@ -1,0 +1,5 @@
+
+
+// the players keep playing until the board is full then we compute the number of connect 4 for each one
+
+//
