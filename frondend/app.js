@@ -1,5 +1,5 @@
 /* =========================================================
-   Connect 4 AI Arena — Frontend Controller & Lazy Tree Viewer
+   Connect 4 AI Arena — Frontend Controller & New-Tab Tree Viewer
    ========================================================= */
 
 const API_BASE = "http://127.0.0.1:5000";
@@ -23,9 +23,10 @@ const state = {
   movesCount: 0,
   isThinking: false,
   gameOver: false,
-  lastMove: null,      // { row, col }
-  animateCoord: null,  // { row, col }
+  lastMove: null,
+  animateCoord: null,
   lastTree: null,
+  lastTelemetry: null,
 };
 
 // DOM References
@@ -89,7 +90,14 @@ const dom = {
    Initialization & Event Listeners
    ========================================================= */
 function init() {
+  // Hide old inline tree buttons since the tree now opens in a dedicated tab
+  if (dom.btnExpandLvl2) dom.btnExpandLvl2.style.display = "none";
+  if (dom.btnCollapseAll) dom.btnCollapseAll.style.display = "none";
+
   bindEvents();
+  setupTreeModalAndTopbarButton();
+  syncDepthBadges();
+
   checkBackendHealth().then((online) => {
     if (online) {
       startNewGame();
@@ -97,9 +105,16 @@ function init() {
   });
 }
 
+function syncDepthBadges() {
+  const k = Math.max(1, parseInt(dom.inputDepth.value, 10) || 1);
+  if (dom.depthBadge) dom.depthBadge.textContent = `K = ${k}`;
+  if (dom.depthWarning) dom.depthWarning.classList.toggle("hidden", k < 7);
+}
+
 function bindEvents() {
-    dom.inputRows.addEventListener("change", () => startNewGame());
-dom.inputCols.addEventListener("change", () => startNewGame());
+  dom.inputRows.addEventListener("change", () => startNewGame());
+  dom.inputCols.addEventListener("change", () => startNewGame());
+
   dom.btnToggleSettings.addEventListener("click", () => {
     dom.settingsPanel.classList.toggle("hidden");
   });
@@ -109,33 +124,38 @@ dom.inputCols.addEventListener("change", () => startNewGame());
   dom.btnPlayAgain.addEventListener("click", () => startNewGame());
 
   dom.inputDepth.addEventListener("input", () => {
-    const k = parseInt(dom.inputDepth.value, 10);
-    dom.depthBadge.textContent = `K = ${k}`;
-    dom.depthWarning.classList.toggle("hidden", k < 7);
+    syncDepthBadges();
+  });
+
+  dom.inputDepth.addEventListener("change", () => {
+    syncDepthBadges();
+    // Auto-apply immediately if match hasn't started yet
+    if (state.movesCount === 0 && !state.isThinking) {
+      startNewGame();
+    }
+  });
+
+  dom.toggleAlphaBeta.addEventListener("change", () => {
+    // Auto-apply immediately if match hasn't started yet
+    if (state.movesCount === 0 && !state.isThinking) {
+      startNewGame();
+    }
   });
 
   dom.colorChoices.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    dom.colorChoices.forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    state.humanColor = btn.dataset.color;
-    state.aiColor = state.humanColor === "red" ? "yellow" : "red";
-    dom.avatarHuman.className = `player-avatar ${state.humanColor}`;
-    dom.avatarAi.className = `player-avatar ${state.aiColor}`;
-    renderBoardDiscs();
+    btn.addEventListener("click", () => {
+      dom.colorChoices.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.humanColor = btn.dataset.color;
+      state.aiColor = state.humanColor === "red" ? "yellow" : "red";
+      dom.avatarHuman.className = `player-avatar ${state.humanColor}`;
+      dom.avatarAi.className = `player-avatar ${state.aiColor}`;
+      renderBoardDiscs();
+    });
   });
-});
 
   dom.toggleIncludeTree.addEventListener("change", () => {
     state.includeTree = dom.toggleIncludeTree.checked;
-  });
-
-  dom.btnExpandLvl2.addEventListener("click", () => {
-    if (state.lastTree) renderMinimaxTree(state.lastTree, 2);
-  });
-
-  dom.btnCollapseAll.addEventListener("click", () => {
-    if (state.lastTree) renderMinimaxTree(state.lastTree, 0);
   });
 }
 
@@ -160,8 +180,10 @@ async function startNewGame() {
   const depth = Math.max(1, parseInt(dom.inputDepth.value, 10) || 4);
   const rows = Math.max(6, Math.min(10, parseInt(dom.inputRows.value, 10) || 6));
   const cols = Math.max(7, Math.min(11, parseInt(dom.inputCols.value, 10) || 7));
+  dom.inputDepth.value = depth;
   dom.inputRows.value = rows;
   dom.inputCols.value = cols;
+  syncDepthBadges();
 
   state.depth = depth;
   state.rows = rows;
@@ -174,6 +196,7 @@ async function startNewGame() {
   state.lastMove = null;
   state.animateCoord = null;
   state.lastTree = null;
+  state.lastTelemetry = null;
 
   try {
     const res = await fetch(`${API_BASE}/start`, {
@@ -205,7 +228,7 @@ async function startNewGame() {
     state.aiScore = 0;
     state.movesCount = 0;
 
-    // Update static UI
+    // Update UI badges
     dom.avatarHuman.className = `player-avatar ${state.humanColor}`;
     dom.avatarAi.className = `player-avatar ${state.aiColor}`;
     dom.maxMoves.textContent = state.rows * state.cols;
@@ -232,11 +255,10 @@ async function startNewGame() {
 async function handleColumnClick(col) {
   if (state.isThinking || state.gameOver) return;
 
-  // Find lowest empty row (row 0 = bottom) for Optimistic UI update
   const targetRow = getLowestEmptyRow(col);
-  if (targetRow === -1) return; // Column is full
+  if (targetRow === -1) return;
 
-  // 1. Optimistic Human Move (instant visual feedback)
+  // 1. Optimistic Human Move
   state.grid[targetRow][col] = HUMAN;
   state.movesCount += 1;
   state.lastMove = { row: targetRow, col };
@@ -263,7 +285,7 @@ async function handleColumnClick(col) {
       throw new Error(data.error || "Move rejected by server.");
     }
 
-    // 2. Sync with authoritative backend state + animate AI disc
+    // 2. Sync with backend state
     state.grid = data.grid;
     state.humanScore = data.human_score;
     state.aiScore = data.ai_score;
@@ -285,14 +307,17 @@ async function handleColumnClick(col) {
     updateTelemetryUI(data);
     updateHeuristicUI(data.heuristic_breakdown);
 
-    if (data.minimax_tree) {
-      state.lastTree = data.minimax_tree;
-      renderMinimaxTree(data.minimax_tree, 2);
-    } else if (!state.includeTree && data.ai_move !== null) {
-      state.lastTree = null;
-      dom.treeContainer.innerHTML =
-        `<div class="tree-empty">GUI Tree is disabled for maximum speed at K=${state.depth}. Enable "GUI Tree" in Settings to inspect nodes.</div>`;
-    }
+    state.lastTree = data.minimax_tree || null;
+    state.lastTelemetry = {
+      col: data.ai_move,
+      timeMs: ((data.execution_time || 0) * 1000).toFixed(2),
+      nodes: data.nodes_expanded || 0,
+      pruned: data.pruned_branches || 0,
+      algo: state.useAlphaBeta ? `Alpha-Beta (K=${state.depth})` : `Plain Minimax (K=${state.depth})`,
+      useAlphaBeta: state.useAlphaBeta,
+    };
+
+    renderTreeLauncherUI();
 
     if (state.gameOver) {
       setTurnUI("over");
@@ -301,7 +326,6 @@ async function handleColumnClick(col) {
       setTurnUI("human");
     }
   } catch (err) {
-    // Revert optimistic move on error
     state.grid[targetRow][col] = EMPTY;
     state.movesCount = Math.max(0, state.movesCount - 1);
     state.isThinking = false;
@@ -315,7 +339,7 @@ async function handleColumnClick(col) {
 }
 
 /* =========================================================
-   Board Rendering (Flipped: row rows-1 at top, row 0 at bottom)
+   Board Rendering
    ========================================================= */
 function getLowestEmptyRow(col) {
   for (let r = 0; r < state.rows; r++) {
@@ -332,7 +356,6 @@ function buildBoardStructure() {
   dom.boardGrid.style.gridTemplateColumns = colTemplate;
   dom.colLabels.style.gridTemplateColumns = colTemplate;
 
-  // Top drop arrows
   dom.colIndicators.innerHTML = "";
   for (let c = 0; c < state.cols; c++) {
     const ind = document.createElement("div");
@@ -345,7 +368,6 @@ function buildBoardStructure() {
     dom.colIndicators.appendChild(ind);
   }
 
-  // Cells: loop TOP (rows - 1) down to BOTTOM (0)
   dom.boardGrid.innerHTML = "";
   for (let r = state.rows - 1; r >= 0; r--) {
     for (let c = 0; c < state.cols; c++) {
@@ -360,7 +382,6 @@ function buildBoardStructure() {
     }
   }
 
-  // Bottom column indices
   dom.colLabels.innerHTML = "";
   for (let c = 0; c < state.cols; c++) {
     const lbl = document.createElement("div");
@@ -397,7 +418,6 @@ function renderBoardDiscs() {
     }
   });
 
-  // Update top indicators disabled state
   const indicators = dom.colIndicators.querySelectorAll(".col-indicator");
   indicators.forEach((ind) => {
     const c = parseInt(ind.dataset.col, 10);
@@ -405,7 +425,6 @@ function renderBoardDiscs() {
     ind.classList.toggle("disabled", colFull || state.isThinking || state.gameOver);
   });
 
-  // Clear one-shot animation flag
   state.animateCoord = null;
 }
 
@@ -460,8 +479,7 @@ function resetAnalyticsUI() {
     positional_control: 0,
   });
 
-  dom.treeContainer.innerHTML =
-    `<div class="tree-empty">Make your first move to inspect the AI's Minimax Alpha-Beta search tree.</div>`;
+  renderTreeLauncherUI();
 }
 
 function updateTelemetryUI(data) {
@@ -487,6 +505,9 @@ function updateHeuristicUI(breakdown) {
   dom.hbPositional.textContent = formatSigned(breakdown.positional_control ?? 0);
 }
 
+/* =========================================================
+   Game Over Banner & Winning Lines Inspector
+   ========================================================= */
 function showGameOverBanner(winner, humanScore, aiScore, winningLines) {
   const w = String(winner || "").toLowerCase();
   if (w === "human") {
@@ -501,7 +522,6 @@ function showGameOverBanner(winner, humanScore, aiScore, winningLines) {
   }
   dom.winnerSubtitle.textContent = `Final Connected-Fours — You: ${humanScore} | AI: ${aiScore}`;
 
-  // Add "Inspect Board" button once next to "Play Again"
   if (!document.getElementById("btn-inspect-board")) {
     const inspectBtn = document.createElement("button");
     inspectBtn.id = "btn-inspect-board";
@@ -597,112 +617,285 @@ function renderWinningLinesInspector(winningLines) {
 
   dom.treeContainer.prepend(box);
 }
+
 /* =========================================================
-   Lazy / Collapsible Minimax Tree Renderer (Zero-Lag at High K)
+   Same-Screen Minimax Tree Modal + Top Bar Button
    ========================================================= */
-function renderMinimaxTree(rootNode, autoExpandDepth = 2) {
-  dom.treeContainer.innerHTML = "";
-  if (!rootNode) {
-    dom.treeContainer.innerHTML = `<div class="tree-empty">No search tree available.</div>`;
-    return;
+let treeModalZoom = 1.0;
+
+function setupTreeModalAndTopbarButton() {
+  // 1. Add "Minimax Tree" button to the Top Bar next to Settings
+  if (!document.getElementById("btn-open-tree-topbar") && dom.btnToggleSettings) {
+    const topBtn = document.createElement("button");
+    topBtn.id = "btn-open-tree-topbar";
+    topBtn.className = dom.btnToggleSettings.className;
+    topBtn.textContent = "🌳 Minimax Tree";
+    topBtn.addEventListener("click", openTreeModal);
+    dom.btnToggleSettings.insertAdjacentElement("beforebegin", topBtn);
   }
-  const rootEl = createTreeNodeElement(rootNode, 0, autoExpandDepth);
-  dom.treeContainer.appendChild(rootEl);
+
+  // 2. Inject Visual Tree CSS + Modal styles once
+  if (!document.getElementById("vtree-modal-styles")) {
+    const style = document.createElement("style");
+    style.id = "vtree-modal-styles";
+    style.textContent = `
+      .tm-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(6, 10, 26, 0.82); backdrop-filter: blur(6px);
+        display: flex; align-items: center; justify-content: center; padding: 20px;
+      }
+      .tm-backdrop.hidden { display: none; }
+      .tm-dialog {
+        width: 95vw; height: 90vh; border-radius: 16px;
+        background: #0e142d; border: 1px solid rgba(255,255,255,0.14);
+        display: flex; flex-direction: column; overflow: hidden;
+        box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+      }
+      .tm-header {
+        display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+        gap: 10px; padding: 14px 18px; background: #151d40;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+      }
+      .tm-title { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+      .tm-stats { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: #b8c4eb; }
+      .tm-pill {
+        padding: 3px 9px; border-radius: 999px;
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+      }
+      .tm-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .tm-btn {
+        padding: 6px 11px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.18);
+        background: #1f2a5c; color: #fff; font-weight: 600; font-size: 12px; cursor: pointer;
+      }
+      .tm-btn:hover { background: #2c3b7e; }
+      .tm-btn.close-btn { background: rgba(239,68,68,0.22); border-color: rgba(239,68,68,0.45); color: #fca5a5; }
+      .tm-btn.close-btn:hover { background: rgba(239,68,68,0.38); }
+      .tm-canvas { flex: 1; overflow: auto; padding: 24px 16px 50px; }
+      .tm-stage { display: inline-block; min-width: 100%; text-align: center; transform-origin: top center; transition: transform 0.15s ease; }
+
+      .vtree ul { padding-top: 24px; padding-left: 0; margin: 0; position: relative; display: flex; justify-content: center; }
+      .vtree > ul { padding-top: 0; }
+      .vtree li { list-style: none; text-align: center; position: relative; padding: 24px 8px 0; display: flex; flex-direction: column; align-items: center; }
+      .vtree > ul > li { padding-top: 0; }
+      .vtree li::before, .vtree li::after { content: ""; position: absolute; top: 0; right: 50%; border-top: 2px solid rgba(148,163,184,0.35); width: 50%; height: 24px; }
+      .vtree li::after { right: auto; left: 50%; border-left: 2px solid rgba(148,163,184,0.35); }
+      .vtree li:only-child::before, .vtree li:only-child::after { display: none; }
+      .vtree li:only-child { padding-top: 0; }
+      .vtree li:first-child::before, .vtree li:last-child::after { border: 0 none; }
+      .vtree li:last-child::before { border-right: 2px solid rgba(148,163,184,0.35); border-radius: 0 6px 0 0; }
+      .vtree li:first-child::after { border-radius: 6px 0 0 0; }
+      .vtree ul ul::before { content: ""; position: absolute; top: 0; left: 50%; border-left: 2px solid rgba(148,163,184,0.35); width: 0; height: 24px; }
+
+      .node-card {
+        display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+        min-width: 108px; padding: 8px 11px; border-radius: 11px;
+        background: #182147; border: 2px solid rgba(255,255,255,0.14);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+        user-select: none; box-shadow: 0 6px 16px rgba(0,0,0,0.28);
+      }
+      .node-card.clickable { cursor: pointer; }
+      .node-card.clickable:hover { border-color: rgba(255,255,255,0.5); transform: translateY(-2px); }
+      .node-card.max { border-color: #3b82f6; background: linear-gradient(180deg, rgba(59,130,246,0.18), #172045); }
+      .node-card.min { border-color: #a855f7; background: linear-gradient(180deg, rgba(168,85,247,0.18), #172045); }
+      .node-card.leaf { border-color: #10b981; background: linear-gradient(180deg, rgba(16,185,129,0.18), #14263a); }
+      .node-card.terminal { border-color: #f59e0b; background: linear-gradient(180deg, rgba(245,158,11,0.2), #252038); }
+      .node-card.pruned { border-color: rgba(239,68,68,0.55); border-style: dashed; background: rgba(239,68,68,0.1); opacity: 0.72; }
+      .n-type { font-size: 10px; font-weight: 800; text-transform: uppercase; }
+      .node-card.max .n-type { color: #60a5fa; }
+      .node-card.min .n-type { color: #c084fc; }
+      .node-card.leaf .n-type { color: #34d399; }
+      .node-card.terminal .n-type { color: #fbbf24; }
+      .node-card.pruned .n-type { color: #f87171; }
+      .n-col { font-size: 13px; font-weight: 700; color: #fff; }
+      .n-val { font-size: 12px; color: #dbeafe; font-weight: 600; }
+      .n-bounds { font-size: 10px; color: #94a3b8; }
+      .n-toggle { margin-top: 2px; font-size: 10px; padding: 1px 7px; border-radius: 999px; background: rgba(255,255,255,0.1); color: #cbd5e1; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // 3. Create Modal DOM once
+  if (!document.getElementById("tree-modal-backdrop")) {
+    const backdrop = document.createElement("div");
+    backdrop.id = "tree-modal-backdrop";
+    backdrop.className = "tm-backdrop hidden";
+    backdrop.innerHTML = `
+      <div class="tm-dialog">
+        <div class="tm-header">
+          <div>
+            <div class="tm-title">🌳 Minimax Visual Search Tree (Latest Move)</div>
+            <div class="tm-stats" id="tm-stats"></div>
+          </div>
+          <div class="tm-controls">
+            <button class="tm-btn" id="tm-lvl1">Depth 1</button>
+            <button class="tm-btn" id="tm-lvl2">Depth 2</button>
+            <button class="tm-btn" id="tm-all">Expand All</button>
+            <button class="tm-btn" id="tm-zout">−</button>
+            <button class="tm-btn" id="tm-zreset">100%</button>
+            <button class="tm-btn" id="tm-zin">+</button>
+            <button class="tm-btn close-btn" id="tm-close">✕ Close</button>
+          </div>
+        </div>
+        <div class="tm-canvas">
+          <div class="tm-stage" id="tm-stage">
+            <div class="vtree" id="tm-root"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) closeTreeModal();
+    });
+    document.getElementById("tm-close").onclick = closeTreeModal;
+    document.getElementById("tm-lvl1").onclick = () => renderVisualTreeInModal(1);
+    document.getElementById("tm-lvl2").onclick = () => renderVisualTreeInModal(2);
+    document.getElementById("tm-all").onclick = () => renderVisualTreeInModal(99);
+    document.getElementById("tm-zin").onclick = () => { treeModalZoom = Math.min(1.6, treeModalZoom + 0.15); applyModalZoom(); };
+    document.getElementById("tm-zout").onclick = () => { treeModalZoom = Math.max(0.35, treeModalZoom - 0.15); applyModalZoom(); };
+    document.getElementById("tm-zreset").onclick = () => { treeModalZoom = 1.0; applyModalZoom(); };
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeTreeModal();
+    });
+  }
 }
 
-function createTreeNodeElement(node, level, autoExpandDepth) {
-  const wrapper = document.createElement("div");
-  wrapper.className = level === 0 ? "tree-node is-root" : "tree-node";
+function applyModalZoom() {
+  const stage = document.getElementById("tm-stage");
+  const btn = document.getElementById("tm-zreset");
+  if (stage) stage.style.transform = `scale(${treeModalZoom})`;
+  if (btn) btn.textContent = `${Math.round(treeModalZoom * 100)}%`;
+}
 
-  const hasChildren = Array.isArray(node.children) && node.children.length > 0 && !node.pruned;
-  let isExpanded = hasChildren && level < autoExpandDepth;
-  let childrenRendered = false;
+function openTreeModal() {
+  if (!state.lastTree) {
+    alert("Make a move first so the AI generates a search tree.");
+    return;
+  }
+  treeModalZoom = 1.0;
+  applyModalZoom();
+  renderVisualTreeInModal(2);
+  document.getElementById("tree-modal-backdrop").classList.remove("hidden");
+}
 
-  const row = document.createElement("div");
-  row.className = node.pruned ? "tree-row pruned-row" : "tree-row";
+function closeTreeModal() {
+  const el = document.getElementById("tree-modal-backdrop");
+  if (el) el.classList.add("hidden");
+}
 
-  // Expand / collapse toggle icon
-  const toggle = document.createElement("span");
-  toggle.className = hasChildren ? "tree-toggle" : "tree-toggle empty";
-  toggle.textContent = isExpanded ? "▾" : "▸";
-  row.appendChild(toggle);
+function formatTreeVal(v) {
+  if (v === null || v === undefined) return "-";
+  if (v === "inf" || v === Infinity) return "+∞";
+  if (v === "-inf" || v === -Infinity) return "-∞";
+  return String(v);
+}
 
-  // Node Type Badge
-  const badge = document.createElement("span");
-  const typeLower = (node.node_type || "leaf").toLowerCase();
-  badge.className = `tree-badge ${typeLower}`;
-  badge.textContent = node.node_type;
-  row.appendChild(badge);
+function buildVisualTreeLi(node, level, expandDepth, useAlphaBeta) {
+  const li = document.createElement("li");
+  const typeLower = String(node.node_type || "leaf").toLowerCase();
+  const hasKids = Array.isArray(node.children) && node.children.length > 0 && !node.pruned;
+  let expanded = hasKids && level < expandDepth;
+  let mounted = false;
 
-  // Column label
-  const colSpan = document.createElement("span");
-  colSpan.className = "tree-col";
-  colSpan.textContent = node.col === null || node.col === undefined ? "ROOT" : `Col ${node.col}`;
-  row.appendChild(colSpan);
+  const card = document.createElement("div");
+  card.className = `node-card ${typeLower}${hasKids ? " clickable" : ""}`;
 
-  // Value / Heuristic Display
+  const t = document.createElement("div");
+  t.className = "n-type";
+  t.textContent = node.node_type;
+  card.appendChild(t);
+
+  const c = document.createElement("div");
+  c.className = "n-col";
+  c.textContent = node.col === null || node.col === undefined ? "ROOT" : `Col ${node.col}`;
+  card.appendChild(c);
+
   if (!node.pruned) {
-    const valSpan = document.createElement("span");
-    valSpan.className = "tree-val";
-    if (node.node_type === "LEAF") {
-      valSpan.textContent = `→ h = ${formatTreeNum(node.heuristic_value)}`;
-    } else if (node.node_type === "TERMINAL") {
-      valSpan.textContent = `→ Board = ${formatTreeNum(node.value)}`;
-    } else {
-      valSpan.textContent = `→ Val = ${formatTreeNum(node.value)}`;
-    }
-    row.appendChild(valSpan);
+    const v = document.createElement("div");
+    v.className = "n-val";
+    if (node.node_type === "LEAF") v.textContent = `h = ${formatTreeVal(node.heuristic_value)}`;
+    else if (node.node_type === "TERMINAL") v.textContent = `Board = ${formatTreeVal(node.value)}`;
+    else v.textContent = `Val = ${formatTreeVal(node.value)}`;
+    card.appendChild(v);
   }
 
-  // Alpha-Beta bounds
-  if (state.useAlphaBeta && (node.alpha !== null || node.beta !== null)) {
-    const boundsSpan = document.createElement("span");
-    boundsSpan.className = "tree-bounds";
-    boundsSpan.textContent = `[α=${formatTreeNum(node.alpha)}, β=${formatTreeNum(node.beta)}]`;
-    row.appendChild(boundsSpan);
+  if (useAlphaBeta && (node.alpha !== null || node.beta !== null)) {
+    const b = document.createElement("div");
+    b.className = "n-bounds";
+    b.textContent = `α:${formatTreeVal(node.alpha)} | β:${formatTreeVal(node.beta)}`;
+    card.appendChild(b);
   }
 
-  // Child count hint when collapsed
-  if (hasChildren) {
-    const countSpan = document.createElement("span");
-    countSpan.className = "tree-bounds";
-    countSpan.textContent = `(${node.children.length})`;
-    row.appendChild(countSpan);
+  let tog = null;
+  if (hasKids) {
+    tog = document.createElement("div");
+    tog.className = "n-toggle";
+    tog.textContent = expanded ? "− hide" : `+ ${node.children.length} branches`;
+    card.appendChild(tog);
   }
 
-  wrapper.appendChild(row);
+  li.appendChild(card);
 
-  // Lazy Children Container
-  if (hasChildren) {
-    const childrenBox = document.createElement("div");
-    childrenBox.className = isExpanded ? "tree-children" : "tree-children hidden";
-    wrapper.appendChild(childrenBox);
+  if (hasKids) {
+    const ul = document.createElement("ul");
+    if (!expanded) ul.classList.add("hidden");
+    li.appendChild(ul);
 
-    const mountChildren = () => {
-      if (childrenRendered) return;
+    const mountKids = () => {
+      if (mounted) return;
       const frag = document.createDocumentFragment();
-      for (const child of node.children) {
-        frag.appendChild(createTreeNodeElement(child, level + 1, autoExpandDepth));
+      for (const ch of node.children) {
+        frag.appendChild(buildVisualTreeLi(ch, level + 1, expandDepth, useAlphaBeta));
       }
-      childrenBox.appendChild(frag);
-      childrenRendered = true;
+      ul.appendChild(frag);
+      mounted = true;
     };
 
-    if (isExpanded) {
-      mountChildren();
-    }
+    if (expanded) mountKids();
 
-    row.addEventListener("click", () => {
-      isExpanded = !isExpanded;
-      toggle.textContent = isExpanded ? "▾" : "▸";
-      if (isExpanded && !childrenRendered) {
-        mountChildren();
-      }
-      childrenBox.classList.toggle("hidden", !isExpanded);
+    card.addEventListener("click", () => {
+      expanded = !expanded;
+      if (expanded && !mounted) mountKids();
+      ul.classList.toggle("hidden", !expanded);
+      tog.textContent = expanded ? "− hide" : `+ ${node.children.length} branches`;
     });
   }
 
-  return wrapper;
+  return li;
+}
+
+function renderVisualTreeInModal(depth) {
+  const rootEl = document.getElementById("tm-root");
+  const statsEl = document.getElementById("tm-stats");
+  const meta = state.lastTelemetry || {};
+
+  statsEl.innerHTML = [
+    meta.algo ? `<span class="tm-pill">${meta.algo}</span>` : "",
+    meta.col !== undefined && meta.col !== null ? `<span class="tm-pill">Selected: Col ${meta.col}</span>` : "",
+    `<span class="tm-pill">Time: ${meta.timeMs || "0.00"} ms</span>`,
+    `<span class="tm-pill">Nodes: ${Number(meta.nodes || 0).toLocaleString()}</span>`,
+    `<span class="tm-pill">Pruned: ${Number(meta.pruned || 0).toLocaleString()}</span>`,
+  ].join("");
+
+  rootEl.innerHTML = "";
+  const topUl = document.createElement("ul");
+  topUl.appendChild(buildVisualTreeLi(state.lastTree, 0, depth, Boolean(meta.useAlphaBeta)));
+  rootEl.appendChild(topUl);
+}
+
+function renderTreeLauncherUI() {
+  dom.treeContainer.innerHTML = "";
+  if (!state.includeTree) {
+    dom.treeContainer.innerHTML = `<div class="tree-empty">GUI Tree is disabled in Settings.</div>`;
+    return;
+  }
+  if (!state.lastTree) {
+    dom.treeContainer.innerHTML = `<div class="tree-empty">Make a move, then click "🌳 Minimax Tree" in the top bar to inspect it.</div>`;
+    return;
+  }
+  dom.treeContainer.innerHTML = `<div class="tree-empty">Latest tree ready (Col ${state.lastTelemetry?.col ?? "—"}). Click <strong>🌳 Minimax Tree</strong> in the top bar to view.</div>`;
 }
 
 /* =========================================================
@@ -711,13 +904,6 @@ function createTreeNodeElement(node, level, autoExpandDepth) {
 function formatSigned(num) {
   if (num > 0) return `+${num}`;
   return String(num);
-}
-
-function formatTreeNum(val) {
-  if (val === null || val === undefined) return "-";
-  if (val === "inf" || val === Infinity) return "+∞";
-  if (val === "-inf" || val === -Infinity) return "-∞";
-  return String(val);
 }
 
 // Boot the Arena
