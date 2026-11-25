@@ -10,7 +10,7 @@ The winner is determined by who has the greater total number of connected-fours
 and both diagonals).
 """
 
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 EMPTY = 0
@@ -207,3 +207,34 @@ class Connect4Board:
         col_labels = " ".join(str(c) for c in range(self.cols))
         lines.append(f"  {col_labels}")
         return "\n".join(lines)
+
+    def get_fours_coords(self, player: int) -> List[Dict[str, Any]]:
+        """Returns exact coordinates and direction of every 4-in-a-row for visual inspection."""
+        grid = self.grid
+        rows, cols = self.rows, self.cols
+        lines: List[Dict[str, Any]] = []
+
+        directions = (
+            (0, 1, "Horizontal —"),
+            (1, 0, "Vertical |"),
+            (1, 1, "Diagonal /"),
+            (1, -1, "Diagonal \\"),
+        )
+
+        for r in range(rows):
+            for c in range(cols):
+                for dr, dc, label in directions:
+                    end_r = r + 3 * dr
+                    end_c = c + 3 * dc
+                    if 0 <= end_r < rows and 0 <= end_c < cols:
+                        coords = []
+                        ok = True
+                        for k in range(4):
+                            rr, cc = r + k * dr, c + k * dc
+                            if grid[rr][cc] != player:
+                                ok = False
+                                break
+                            coords.append({"row": rr, "col": cc})
+                        if ok:
+                            lines.append({"direction": label, "cells": coords})
+        return lines
