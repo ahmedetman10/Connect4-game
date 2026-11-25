@@ -1,209 +1,247 @@
-"""
-Connect 4 Board Representation and Game Mechanics.
-
-Implements a configurable Connect 4 grid (minimum 6 rows x 7 columns) where
-players take turns dropping discs until the board is completely full.
-The winner is determined by who has the greater total number of connected-fours
-(horizontal, vertical, 
-
-
-and both diagonals).
-"""
-
-from typing import List, Optional, Tuple
-
+from typing import Any, Dict, List, Optional, Tuple
 
 EMPTY = 0
 HUMAN = 1
 AI = 2
 
-# instead naming the cells we number them as it is lighter
-
 
 class Connect4Board:
     """
-    take care here:
-    >> grid state with O(1) move/undo operations
+    High-performance Row-Major Bitboard representation of Connect 4
+    supporting arbitrary board dimensions (rows >= 6, cols >= 7).
 
-    >> row 0 is the bottom row (where the first disc drops)
-    and row (rows - 1) is the top row
+    Bit layout:
+      Bit index of cell (r, c) where r=0 is the bottom row: `r * cols + c`.
+      Wrap-around across row boundaries is prevented using `not_last_col`
+      and `not_first_col` bitmasks.
     """
 
+    __slots__ = (
+        "rows",
+        "cols",
+        "human_mask",
+        "ai_mask",
+        "not_last_col",
+        "not_first_col",
+        "col_heights",
+        "moves_count",
+        "max_moves",
+        "_history",
+        "_center_order",
+        "_left_order",
+    )
+
     def __init__(self, rows: int = 6, cols: int = 7) -> None:
-        # the minimum dimensions are (6, 7)
         if rows < 6 or cols < 7:
-            raise ValueError("Board dimensions must be at least 6 rows x 7 columns.")
+            raise ValueError("Board dimensions must be at least 6 rows x 7 cols.")
 
         self.rows: int = rows
         self.cols: int = cols
-        self.grid: List[List[int]] = [[EMPTY] * cols for _ in range(rows)]
-        # we start with an empty grid
-        self.col_heights: List[int] = [0] * cols
-        # tracks the next open row index for each column
-        # helps in making insert operation O(1) instead of O(rows)
-        self.move_history: List[Tuple[int, int]] = []
-        # history stack of (col, player) moves to support fast O(1)
-        self.total_moves: int = 0 #detemines whether the board is full
-        center = cols // 2
-        # center column first to improve alpha-beta pruning efficiency
-        # like starting with the smaller values in branches in trivial tree
-    
-        self._center_order: List[int] = sorted(
-            range(cols), key=lambda c: (abs(c - center), c)
-        )
-       
 
+        self.human_mask: int = 0
+        self.ai_mask: int = 0
+        self.col_heights: List[int] = [0] * cols
+        self.moves_count: int = 0
+        self.max_moves: int = rows * cols
+        self._history: List[Tuple[int, int, int]] = []  # (row, col, player)
+
+        # Precompute boundary masks once to prevent horizontal/diagonal wrap-around
+        not_last = 0
+        not_first = 0
+        for r in range(rows):
+            row_base = r * cols
+            for c in range(cols):
+                bit = 1 << (row_base + c)
+                if c != cols - 1:
+                    not_last |= bit
+                if c != 0:
+                    not_first |= bit
+        self.not_last_col: int = not_last
+        self.not_first_col: int = not_first
+
+        # Precompute column orders once (avoids sorting on every search node)
+        center = cols // 2
+        self._left_order: Tuple[int, ...] = tuple(range(cols))
+        self._center_order: Tuple[int, ...] = tuple(
+            sorted(range(cols), key=lambda c: (abs(c - center), c))
+        )
+
+    @property
+    def grid(self) -> List[List[int]]:
+        """Reconstructs the 2D list (row 0 = bottom) on demand for API/CLI compatibility."""
+        h_mask = self.human_mask
+        a_mask = self.ai_mask
+        rows = self.rows
+        cols = self.cols
+
+        board_grid = [[EMPTY] * cols for _ in range(rows)]
+        for c in range(cols):
+            col_h = self.col_heights[c]
+            for r in range(col_h):
+                bit = 1 << (r * cols + c)
+                if h_mask & bit:
+                    board_grid[r][c] = HUMAN
+                elif a_mask & bit:
+                    board_grid[r][c] = AI
+        return board_grid
 
     def is_valid_col(self, col: int) -> bool:
-        # detects whether the col is available or not
-        return (0 <= col < self.cols) and (self.col_heights[col] < self.rows)
-        # you see the benefit of col_heights
+        return 0 <= col < self.cols and self.col_heights[col] < self.rows
 
-    def get_available_cols(self, center_first: bool = True) -> List[int]:
-
-        order = self._center_order if center_first else range(self.cols)
-        return [c for c in order if self.col_heights[c] < self.rows]
-        # the difference between the center first and the ordinary order
-
-    def drop_disc(self, col: int, player: int) -> Optional[int]:
-        # drops the discs in the board
-
-        if not self.is_valid_col(col):
-            return None
-
+    def drop_disc(self, col: int, player: int) -> int:
         row = self.col_heights[col]
-        # finds the row at the top of this col
-        self.grid[row][col] = player
-        # marks that row with the player
-        self.col_heights[col] += 1
-        # moves the col upward
-        self.total_moves += 1
-        self.move_history.append((col, player))
-        # record the move for the history
+        if row >= self.rows:
+            raise ValueError(f"Column {col} is full.")
+
+        bit = 1 << (row * self.cols + col)
+        if player == HUMAN:
+            self.human_mask |= bit
+        else:
+            self.ai_mask |= bit
+
+        self.col_heights[col] = row + 1
+        self.moves_count += 1
+        self._history.append((row, col, player))
         return row
 
-        ## the previous function does not require searching for the empty rows
-        ## and runs in O(1) due to col_heights
+    def undo_move(self) -> Tuple[int, int]:
+        if not self._history:
+            raise ValueError("No moves to undo.")
 
-    def undo_move(self) -> Optional[Tuple[int, int]]:
-        # removes the last move in O(1) using the move_history
-        # it is typically the reverse of the previous function
-    
-        if not self.move_history:
-            return None
+        row, col, player = self._history.pop()
+        bit = 1 << (row * self.cols + col)
+        if player == HUMAN:
+            self.human_mask ^= bit
+        else:
+            self.ai_mask ^= bit
 
-        col, player = self.move_history.pop()
-        self.col_heights[col] -= 1
-        row = self.col_heights[col]
-        self.grid[row][col] = EMPTY
-        self.total_moves -= 1
-        return col, player
-
-    ## using the previous 2 functions Min-Max here is very efficient
-    ## as we make the move and undo it in O(1) operations instead of 
-    ## making a new board for each option
-    
+        self.col_heights[col] = row
+        self.moves_count -= 1
+        return row, col
 
     def is_full(self) -> bool:
-    
-        return self.total_moves >= self.rows * self.cols
+        return self.moves_count >= self.max_moves
+
+    def get_available_cols(self, center_first: bool = True) -> List[int]:
+        heights = self.col_heights
+        rows = self.rows
+        order = self._center_order if center_first else self._left_order
+        return [c for c in order if heights[c] < rows]
 
     def count_fours(self, player: int) -> int:
+        """Counts all overlapping 4-in-a-row sequences in O(1) using bitwise shifts."""
+        bb = self.human_mask if player == HUMAN else self.ai_mask
+        if bb == 0:
+            return 0
 
-        grid = self.grid
-        rows, cols = self.rows, self.cols
-        count = 0
+        c = self.cols
+        not_last = self.not_last_col
+        not_first = self.not_first_col
 
-        # horizontall
-        for r in range(rows):
-            row_cells = grid[r]
-            for c in range(cols - 3):
-                # this is imp to not exceed the bounary
-                if (
-                    row_cells[c] == player
-                    and row_cells[c + 1] == player
-                    and row_cells[c + 2] == player
-                    and row_cells[c + 3] == player
-                ):
-                    count += 1
+        # 1. Vertical (|): step = cols
+        v1 = bb >> c
+        v2 = v1 >> c
+        v3 = v2 >> c
+        total = (bb & v1 & v2 & v3).bit_count()
 
-        # vertical
-        for c in range(cols):
-            for r in range(rows - 3):
-                if (
-                    grid[r][c] == player
-                    and grid[r + 1][c] == player
-                    and grid[r + 2][c] == player
-                    and grid[r + 3][c] == player
-                ):
-                    count += 1
+        # 2. Horizontal (-): step = 1
+        h1 = (bb >> 1) & not_last
+        h2 = (h1 >> 1) & not_last
+        h3 = (h2 >> 1) & not_last
+        total += (bb & h1 & h2 & h3).bit_count()
 
-        # diagonal(/)
-        for r in range(rows - 3):
-            for c in range(cols - 3):
-                if (
-                    grid[r][c] == player
-                    and grid[r + 1][c + 1] == player
-                    and grid[r + 2][c + 2] == player
-                    and grid[r + 3][c + 3] == player
-                ):
-                    count += 1
+        # 3. Diagonal Up-Right (/): step = cols + 1
+        d1 = c + 1
+        u1 = (bb >> d1) & not_last
+        u2 = (u1 >> d1) & not_last
+        u3 = (u2 >> d1) & not_last
+        total += (bb & u1 & u2 & u3).bit_count()
 
-        # diagonally(\)
-        for r in range(3, rows):
-            # we start with row= 3 as we subtract 3
-            for c in range(cols - 3):
-                if (
-                    grid[r][c] == player
-                    and grid[r - 1][c + 1] == player
-                    and grid[r - 2][c + 2] == player
-                    and grid[r - 3][c + 3] == player
-                ):
-                    count += 1
+        # 4. Diagonal Up-Left (\): step = cols - 1
+        d2 = c - 1
+        l1 = (bb >> d2) & not_first
+        l2 = (l1 >> d2) & not_first
+        l3 = (l2 >> d2) & not_first
+        total += (bb & l1 & l2 & l3).bit_count()
 
-        return count
+        return total
+
+    def state_key(self) -> Tuple[int, int]:
+        """O(1) hashable key representing the exact board state for Transposition Tables."""
+        return (self.human_mask, self.ai_mask)
+
+    def clone(self) -> "Connect4Board":
+        new_board = Connect4Board.__new__(Connect4Board)
+        new_board.rows = self.rows
+        new_board.cols = self.cols
+        new_board.human_mask = self.human_mask
+        new_board.ai_mask = self.ai_mask
+        new_board.not_last_col = self.not_last_col
+        new_board.not_first_col = self.not_first_col
+        new_board.col_heights = self.col_heights.copy()
+        new_board.moves_count = self.moves_count
+        new_board.max_moves = self.max_moves
+        new_board._history = self._history.copy()
+        new_board._center_order = self._center_order
+        new_board._left_order = self._left_order
+        return new_board
+
+    def __str__(self) -> str:
+        symbols = {EMPTY: ".", HUMAN: "X", AI: "O"}
+        g = self.grid
+        lines = []
+        for r in range(self.rows - 1, -1, -1):
+            lines.append(" ".join(symbols[g[r][c]] for c in range(self.cols)))
+        lines.append(" ".join(str(c) for c in range(self.cols)))
+        return "\n".join(lines)
+    def render_ascii(self) -> str:
+        return self.__str__()
+
+    def to_matrix(self) -> List[List[int]]:
+        return self.grid
 
     def get_scores(self) -> Tuple[int, int]:
-
         return self.count_fours(HUMAN), self.count_fours(AI)
 
     def get_winner(self) -> Optional[str]:
-
         if not self.is_full():
             return None
         human_score, ai_score = self.get_scores()
-        if human_score > ai_score:
-            return "Human"
         if ai_score > human_score:
             return "AI"
+        if human_score > ai_score:
+            return "Human"
         return "Draw"
 
-    def clone(self) -> "Connect4Board":
+    def get_fours_coords(self, player: int) -> List[Dict[str, Any]]:
+        """Returns exact coordinates and direction of every 4-in-a-row for visual verification."""
+        bb = self.human_mask if player == HUMAN else self.ai_mask
+        if bb == 0:
+            return []
 
-        copy_board = Connect4Board(self.rows, self.cols)
-        copy_board.grid = [row[:] for row in self.grid]
-        copy_board.col_heights = self.col_heights[:]
-        ## this is deep copy not referecne copy
+        lines: List[Dict[str, Any]] = []
+        rows, cols = self.rows, self.cols
+        directions = (
+            (0, 1, "Horizontal —"),
+            (1, 0, "Vertical |"),
+            (1, 1, "Diagonal /"),
+            (1, -1, "Diagonal \\"),
+        )
 
-        copy_board.total_moves = self.total_moves
-        copy_board.move_history = self.move_history[:]
-        return copy_board
-
-    def to_matrix(self) -> List[List[int]]:
-        """
-        Return a copy of the 2D grid (row 0 = bottom, row rows-1 = top)
-        suitable for JSON serialization.
-        """
-        return [row[:] for row in self.grid]
-
-    def render_ascii(self, human_symbol: str = "X", ai_symbol: str = "O") -> str:
-
-        symbols = {EMPTY: ".", HUMAN: human_symbol, AI: ai_symbol}
-        lines = []
-        for r in range(self.rows - 1, -1, -1):
-            row_str = " ".join(symbols[cell] for cell in self.grid[r])
-            lines.append(f"| {row_str} |")
-        lines.append("+" + "-" * (2 * self.cols + 1) + "+")
-        col_labels = " ".join(str(c) for c in range(self.cols))
-        lines.append(f"  {col_labels}")
-        return "\n".join(lines)
+        for r in range(rows):
+            for c in range(cols):
+                for dr, dc, label in directions:
+                    end_r = r + 3 * dr
+                    end_c = c + 3 * dc
+                    if 0 <= end_r < rows and 0 <= end_c < cols:
+                        coords = []
+                        ok = True
+                        for k in range(4):
+                            rr, cc = r + k * dr, c + k * dc
+                            if not (bb & (1 << (rr * cols + cc))):
+                                ok = False
+                                break
+                            coords.append({"row": rr, "col": cc})
+                        if ok:
+                            lines.append({"direction": label, "cells": coords})
+        return lines

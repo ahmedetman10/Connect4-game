@@ -1,397 +1,505 @@
-
-
-from dataclasses import dataclass, field
 import math
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from game_board import Connect4Board, HUMAN, AI
+from game_board import AI, HUMAN, Connect4Board
 from heuristic import BoardEvaluator
+
+# Transposition Table Bound Flags
+TT_EXACT = 0
+TT_LOWERBOUND = 1
+TT_UPPERBOUND = 2
+
+
+def _serialize_num(val: Optional[float]) -> Any:
+    """Converts Python inf/-inf into JSON-safe strings for the frontend."""
+    if val is None:
+        return None
+    if val == math.inf:
+        return "inf"
+    if val == -math.inf:
+        return "-inf"
+    return val
 
 
 @dataclass
 class TreeNode:
-    """Represents a single node in the Minimax / Alpha-Beta search tree."""
-
-    node_type: str  # "MAX", "MIN", "LEAF", "TERMINAL", or "PRUNED"
-    col: Optional[int]  # Column played to reach this node (None for root)
-    depth: int  # Remaining search depth at this node
-    value: Optional[float] = None  # Minimax backed-up value (or leaf score)
-    heuristic_value: Optional[int] = None  # Explicit board heuristic value at leaves
+    node_type: str  # "MAX", "MIN", "LEAF", "TERMINAL", "PRUNED"
+    col: Optional[int] = None
+    depth: int = 0
+    value: Optional[float] = None
+    heuristic_value: Optional[float] = None
     alpha: Optional[float] = None
     beta: Optional[float] = None
     pruned: bool = False
     children: List["TreeNode"] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize the node and its subtree into JSON-safe dictionaries."""
-        def _fmt_bound(v: Optional[float]) -> Optional[Any]:
-            if v is None:
-                return None
-            if v == math.inf:
-                return "inf"
-            if v == -math.inf:
-                return "-inf"
-            return v
-
         return {
             "node_type": self.node_type,
             "col": self.col,
             "depth": self.depth,
-            "value": _fmt_bound(self.value),
-            "heuristic_value": self.heuristic_value,
-            "alpha": _fmt_bound(self.alpha),
-            "beta": _fmt_bound(self.beta),
+            "value": _serialize_num(self.value),
+            "heuristic_value": _serialize_num(self.heuristic_value),
+            "alpha": _serialize_num(self.alpha),
+            "beta": _serialize_num(self.beta),
             "pruned": self.pruned,
             "children": [child.to_dict() for child in self.children],
         }
 
+    def format_tree(self, indent: str = "", is_last: bool = True) -> str:
+        connector = "└── " if is_last else "├── "
+        col_str = "ROOT" if self.col is None else f"Col {self.col}"
 
-def format_minimax_tree(
-    root: TreeNode,
-    use_alpha_beta: bool = True,
-    max_print_depth: Optional[int] = None,
-) -> str:
+        if self.pruned:
+            line = f"{indent}{connector}[PRUNED] {col_str}"
+        elif self.node_type == "LEAF":
+            line = f"{indent}{connector}[LEAF] {col_str} -> h={self.heuristic_value}"
+        elif self.node_type == "TERMINAL":
+            line = f"{indent}{connector}[TERMINAL] {col_str} -> Val={self.value}"
+        else:
+            bounds = ""
+            if self.alpha is not None or self.beta is not None:
+                a_s = _serialize_num(self.alpha)
+                b_s = _serialize_num(self.beta)
+                bounds = f" [α={a_s}, β={b_s}]"
+            line = f"{indent}{connector}[{self.node_type}] {col_str} -> Val={self.value}{bounds}"
+
+        lines = [line]
+        child_indent = indent + ("    " if is_last else "│   ")
+        for idx, child in enumerate(self.children):
+            lines.append(child.format_tree(child_indent, idx == len(self.children) - 1))
+        return "\n".join(lines)
+
+
+class MinimaxEngine:
     """
-    Format a TreeNode hierarchy as a readable, traceable console tree.
-
-    Explicitly displays:
-    - Node role (MAX / MIN / LEAF / TERMINAL / PRUNED)
-    - Column move
-    - Evaluated score
-    - Explicit Heuristic Board Value at every leaf / cutoff node
-    - Alpha / Beta bounds (when alpha-beta pruning is enabled)
-    """
-    lines: List[str] = []
-
-    def _fmt(v: Optional[float]) -> str:
-        if v is None:
-            return "-"
-        if v == math.inf:
-            return "+inf"
-        if v == -math.inf:
-            return "-inf"
-        return str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else f"{v:.1f}"
-
-    def _walk(node: TreeNode, prefix: str, is_last: bool, level: int) -> None:
-        connector = "" if level == 0 else ("`-- " if is_last else "|-- ")
-        col_label = "ROOT" if node.col is None else f"Col {node.col}"
-
-        if node.pruned:
-            bounds = f" [alpha={_fmt(node.alpha)}, beta={_fmt(node.beta)}]" if use_alpha_beta else ""
-            lines.append(f"{prefix}{connector}[PRUNED] {col_label}{bounds}")
-            return
-
-        if node.node_type == "TERMINAL":
-            lines.append(
-                f"{prefix}{connector}TERMINAL ({col_label}) -> "
-                f"Board Value = {_fmt(node.value)}"
-            )
-            return
-
-        if node.node_type == "LEAF":
-            lines.append(
-                f"{prefix}{connector}LEAF ({col_label}) -> "
-                f"Heuristic Board Value = {node.heuristic_value}"
-            )
-            return
-
-        bounds = (
-            f" [alpha={_fmt(node.alpha)}, beta={_fmt(node.beta)}]"
-            if use_alpha_beta
-            else ""
-        )
-        lines.append(
-            f"{prefix}{connector}{node.node_type} ({col_label}) -> "
-            f"Val = {_fmt(node.value)}{bounds}"
-        )
-
-        if max_print_depth is not None and level >= max_print_depth:
-            if node.children:
-                child_prefix = prefix + ("    " if is_last else "|   ")
-                lines.append(
-                    f"{child_prefix}... ({len(node.children)} deeper branches omitted)"
-                )
-            return
-
-        child_prefix = "" if level == 0 else prefix + ("    " if is_last else "|   ")
-        for idx, child in enumerate(node.children):
-            _walk(child, child_prefix, idx == len(node.children) - 1, level + 1)
-
-    _walk(root, "", True, 0)
-    return "\n".join(lines)
-
-
-class MinimaxAgent:
-    """
-    Connect 4 AI Agent using depth-limited Minimax with Alpha-Beta Pruning.
-
-    Attributes:
-        k_depth (int): Maximum search depth K before heuristic cutoff.
-        use_alpha_beta (bool): Enable alpha-beta pruning (True by default).
-        nodes_expanded (int): Count of nodes expanded during the last search.
-        pruned_branches (int): Count of pruned sibling branches in the last search.
-        execution_time (float): Elapsed time in seconds for the last search.
-        last_tree (Optional[TreeNode]): Root of the most recent search tree.
+    Optimized Connect 4 Minimax Engine featuring:
+      - Bitboard-powered fast search & evaluation
+      - Transposition Table (Exact / Lower / Upper bounds)
+      - Iterative Deepening with PV/TT Move Ordering
+      - Constrained Tree Recording for lag-free UI inspection at high K
     """
 
-    TERMINAL_SCORE_SCALE = 10000
+    MAX_TT_ENTRIES = 500_000
 
     def __init__(
         self,
         k_depth: int = 4,
         evaluator: Optional[BoardEvaluator] = None,
+        use_alpha_beta: bool = True,
         ai_player: int = AI,
         opp_player: int = HUMAN,
-        use_alpha_beta: bool = True,
+        depth: Optional[int] = None,
     ) -> None:
-        if k_depth < 1:
-            raise ValueError("Search depth K must be at least 1.")
-        self.k_depth = k_depth
-        self.ai_player = ai_player
-        self.opp_player = opp_player
-        self.evaluator = evaluator or BoardEvaluator(ai_player=ai_player, opp_player=opp_player)
-        self.use_alpha_beta = use_alpha_beta
-
-        # Per-turn telemetry
+        self.k_depth: int = depth if depth is not None else k_depth
+        self.use_alpha_beta: bool = use_alpha_beta
+        self.ai_player: int = ai_player
+        self.opp_player: int = opp_player
+        self.evaluator = evaluator or BoardEvaluator(
+            ai_player=ai_player, opp_player=opp_player
+        )
+        # key: (human_mask, ai_mask, maximizing)
+        # val: (depth, flag, score, best_col)
+        self.tt: Dict[Tuple[int, int, bool], Tuple[int, int, float, Optional[int]]] = {}
         self.nodes_expanded: int = 0
         self.pruned_branches: int = 0
+        self.tt_hits: int = 0
         self.execution_time: float = 0.0
+        self.best_score: float = 0.0
         self.last_tree: Optional[TreeNode] = None
+
+    def clear_cache(self) -> None:
+        self.tt.clear()
 
     def choose_move(
         self,
         board: Connect4Board,
-        print_tree: bool = True,
+        depth: Optional[int] = None,
+        use_alpha_beta: Optional[bool] = None,
+        print_tree: bool = False,
         record_tree: bool = True,
-    ) -> Tuple[int, float]:
-        """
-        Run Minimax (with optional Alpha-Beta pruning) on a copy of `board`.
-
-        Returns:
-            (best_col, best_value)
-        """
-        self.nodes_expanded = 0
-        self.pruned_branches = 0
+        max_tree_depth: Optional[int] = None,
+    ) -> Tuple[Optional[int], float]:
         start_time = time.perf_counter()
 
-        sim_board = board.clone()
-        valid_cols = sim_board.get_available_cols(center_first=self.use_alpha_beta)
-        if not valid_cols:
-            raise ValueError("No valid moves available: board is already full.")
-
-        root_node = TreeNode(
-            node_type="MAX",
-            col=None,
-            depth=self.k_depth,
-            alpha=-math.inf,
-            beta=math.inf,
+        search_depth = self.k_depth if depth is None else depth
+        alpha_beta = (
+            self.use_alpha_beta if use_alpha_beta is None else use_alpha_beta
         )
-        self.nodes_expanded += 1
 
-        best_col = valid_cols[0]
-        best_val = -math.inf
-        alpha = -math.inf
-        beta = math.inf
-
-        for idx, col in enumerate(valid_cols):
-            sim_board.drop_disc(col, self.ai_player)
-            child_val, child_node = self._search(
-                board=sim_board,
-                depth=self.k_depth - 1,
-                is_maximizing=False,
-                alpha=alpha,
-                beta=beta,
-                move_col=col,
-                record_tree=record_tree,
+        if board.is_full():
+            final_score = float(
+                BoardEvaluator.W_FOUR
+                * (board.count_fours(self.ai_player) - board.count_fours(self.opp_player))
             )
-            sim_board.undo_move()
+            self.nodes_expanded = 0
+            self.pruned_branches = 0
+            self.execution_time = time.perf_counter() - start_time
+            self.best_score = final_score
+            self.last_tree = None
+            return None, final_score
 
-            if record_tree and child_node is not None:
-                root_node.children.append(child_node)
+        # Prevent unbounded RAM growth across long matches
+        if len(self.tt) > self.MAX_TT_ENTRIES:
+            self.tt.clear()
 
-            if child_val > best_val:
-                best_val = child_val
-                best_col = col
+        self.nodes_expanded = 0
+        self.pruned_branches = 0
+        self.tt_hits = 0
 
-            if self.use_alpha_beta:
-                alpha = max(alpha, best_val)
-                if beta <= alpha and idx < len(valid_cols) - 1:
-                    self.pruned_branches += len(valid_cols) - 1 - idx
-                    if record_tree:
-                        for pruned_col in valid_cols[idx + 1 :]:
-                            root_node.children.append(
-                                TreeNode(
-                                    node_type="PRUNED",
-                                    col=pruned_col,
-                                    depth=self.k_depth - 1,
-                                    alpha=alpha,
-                                    beta=beta,
-                                    pruned=True,
-                                )
-                            )
-                    break
+        # Cap recorded GUI tree depth at high K so the engine searches full K
+        # without allocating hundreds of thousands of TreeNode objects.
+        if max_tree_depth is None:
+            tree_limit = search_depth if search_depth <= 4 else 3
+        else:
+            tree_limit = max_tree_depth
 
-        root_node.value = best_val
-        root_node.alpha = alpha
-        root_node.beta = beta
+        need_tree = record_tree or print_tree
+        best_col: Optional[int] = None
+        best_score: float = -math.inf
+        root_tree: Optional[TreeNode] = None
+
+        if alpha_beta:
+            # Iterative Deepening warm-up for K >= 5 to populate TT move ordering
+            if search_depth >= 5:
+                for d in range(1, search_depth):
+                    self._alphabeta(
+                        board=board,
+                        depth=d,
+                        alpha=-math.inf,
+                        beta=math.inf,
+                        maximizing=True,
+                        record_tree=False,
+                        tree_depth_left=0,
+                    )
+
+            if need_tree:
+                root_tree = TreeNode(
+                    node_type="MAX",
+                    col=None,
+                    depth=0,
+                    alpha=-math.inf,
+                    beta=math.inf,
+                )
+
+            best_score, best_col = self._alphabeta(
+                board=board,
+                depth=search_depth,
+                alpha=-math.inf,
+                beta=math.inf,
+                maximizing=True,
+                record_tree=need_tree,
+                tree_depth_left=tree_limit,
+                tree_node=root_tree,
+            )
+        else:
+            # Plain Minimax (no Alpha-Beta, no TT) for fair benchmark comparison
+            if need_tree:
+                root_tree = TreeNode(node_type="MAX", col=None, depth=0)
+
+            best_score, best_col = self._minimax_plain(
+                board=board,
+                depth=search_depth,
+                maximizing=True,
+                record_tree=need_tree,
+                tree_depth_left=tree_limit,
+                tree_node=root_tree,
+            )
+
+        if root_tree is not None:
+            root_tree.value = best_score
+
         self.execution_time = time.perf_counter() - start_time
-        self.last_tree = root_node if record_tree else None
+        self.best_score = best_score
+        self.last_tree = root_tree
 
-        if print_tree and record_tree:
-            algo_name = "MINIMAX + ALPHA-BETA" if self.use_alpha_beta else "PLAIN MINIMAX"
-            print(f"\n================ {algo_name} (K={self.k_depth}) ================")
-            print(format_minimax_tree(root_node, use_alpha_beta=self.use_alpha_beta))
-            print(
-                f"Selected Move: Col {best_col} | Value: {best_val} | "
-                f"Nodes Expanded: {self.nodes_expanded} | "
-                f"Pruned: {self.pruned_branches} | "
-                f"Time: {self.execution_time * 1000:.2f} ms"
-            )
-            print("================================================================\n")
+        if print_tree and root_tree is not None:
+            print(root_tree.format_tree())
 
-        return best_col, best_val
+        return best_col, best_score
 
-    def _search(
+    def _alphabeta(
         self,
         board: Connect4Board,
         depth: int,
-        is_maximizing: bool,
         alpha: float,
         beta: float,
-        move_col: int,
+        maximizing: bool,
         record_tree: bool,
-    ) -> Tuple[float, Optional[TreeNode]]:
-        """Recursive Minimax with Alpha-Beta Pruning."""
+        tree_depth_left: int,
+        tree_node: Optional[TreeNode] = None,
+    ) -> Tuple[float, Optional[int]]:
+        self.nodes_expanded += 1
+        orig_alpha = alpha
+        orig_beta = beta
+
+        # 1. Terminal check (board completely full)
+        if board.is_full():
+            score = BoardEvaluator.W_FOUR * (
+                board.count_fours(self.ai_player) - board.count_fours(self.opp_player)
+            )
+            if tree_node is not None:
+                tree_node.node_type = "TERMINAL"
+                tree_node.value = score
+            return score, None
+
+        # 2. Depth limit reached -> Bitboard Heuristic Evaluation
+        if depth == 0:
+            score = self.evaluator.evaluate(board)
+            if tree_node is not None:
+                tree_node.node_type = "LEAF"
+                tree_node.heuristic_value = score
+                tree_node.value = score
+            return score, None
+
+        # 3. Transposition Table Lookup
+        tt_key = (board.human_mask, board.ai_mask, maximizing)
+        tt_entry = self.tt.get(tt_key)
+        tt_best_col: Optional[int] = None
+
+        if tt_entry is not None:
+            entry_depth, entry_flag, entry_val, tt_best_col = tt_entry
+            can_cutoff = not (record_tree and tree_node is not None and tree_node.col is None)
+            if can_cutoff and entry_depth >= depth:
+                self.tt_hits += 1
+                if entry_flag == TT_EXACT:
+                    if tree_node is not None:
+                        tree_node.value = entry_val
+                        tree_node.alpha = alpha
+                        tree_node.beta = beta
+                    return entry_val, tt_best_col
+                elif entry_flag == TT_LOWERBOUND:
+                    if entry_val > alpha:
+                        alpha = entry_val
+                elif entry_flag == TT_UPPERBOUND:
+                    if entry_val < beta:
+                        beta = entry_val
+
+                if alpha >= beta:
+                    self.pruned_branches += 1
+                    if tree_node is not None:
+                        tree_node.value = entry_val
+                        tree_node.alpha = alpha
+                        tree_node.beta = beta
+                    return entry_val, tt_best_col
+
+        # 4. Move Ordering: TT best move first, then center-first
+        cols = board.get_available_cols(center_first=True)
+        if tt_best_col is not None and tt_best_col in cols:
+            cols.remove(tt_best_col)
+            cols.insert(0, tt_best_col)
+
+        best_col = cols[0]
+        record_children = record_tree and tree_node is not None and tree_depth_left > 0
+
+        if maximizing:
+            value = -math.inf
+            for idx, col in enumerate(cols):
+                board.drop_disc(col, self.ai_player)
+
+                child_node: Optional[TreeNode] = None
+                if record_children:
+                    child_node = TreeNode(
+                        node_type="MIN",
+                        col=col,
+                        depth=tree_node.depth + 1,
+                        alpha=alpha,
+                        beta=beta,
+                    )
+                    tree_node.children.append(child_node)
+
+                child_val, _ = self._alphabeta(
+                    board=board,
+                    depth=depth - 1,
+                    alpha=alpha,
+                    beta=beta,
+                    maximizing=False,
+                    record_tree=record_children,
+                    tree_depth_left=tree_depth_left - 1,
+                    tree_node=child_node,
+                )
+                board.undo_move()
+
+                if child_val > value:
+                    value = child_val
+                    best_col = col
+                if value > alpha:
+                    alpha = value
+
+                if alpha >= beta:
+                    remaining = len(cols) - idx - 1
+                    if remaining > 0:
+                        self.pruned_branches += remaining
+                        if record_children:
+                            for p_col in cols[idx + 1 :]:
+                                tree_node.children.append(
+                                    TreeNode(
+                                        node_type="PRUNED",
+                                        col=p_col,
+                                        depth=tree_node.depth + 1,
+                                        alpha=alpha,
+                                        beta=beta,
+                                        pruned=True,
+                                    )
+                                )
+                    break
+        else:
+            value = math.inf
+            for idx, col in enumerate(cols):
+                board.drop_disc(col, self.opp_player)
+
+                child_node = None
+                if record_children:
+                    child_node = TreeNode(
+                        node_type="MAX",
+                        col=col,
+                        depth=tree_node.depth + 1,
+                        alpha=alpha,
+                        beta=beta,
+                    )
+                    tree_node.children.append(child_node)
+
+                child_val, _ = self._alphabeta(
+                    board=board,
+                    depth=depth - 1,
+                    alpha=alpha,
+                    beta=beta,
+                    maximizing=True,
+                    record_tree=record_children,
+                    tree_depth_left=tree_depth_left - 1,
+                    tree_node=child_node,
+                )
+                board.undo_move()
+
+                if child_val < value:
+                    value = child_val
+                    best_col = col
+                if value < beta:
+                    beta = value
+
+                if alpha >= beta:
+                    remaining = len(cols) - idx - 1
+                    if remaining > 0:
+                        self.pruned_branches += remaining
+                        if record_children:
+                            for p_col in cols[idx + 1 :]:
+                                tree_node.children.append(
+                                    TreeNode(
+                                        node_type="PRUNED",
+                                        col=p_col,
+                                        depth=tree_node.depth + 1,
+                                        alpha=alpha,
+                                        beta=beta,
+                                        pruned=True,
+                                    )
+                                )
+                    break
+
+        # 5. Store in Transposition Table
+        if value <= orig_alpha:
+            flag = TT_UPPERBOUND
+        elif value >= orig_beta:
+            flag = TT_LOWERBOUND
+        else:
+            flag = TT_EXACT
+
+        if tt_entry is None or depth >= tt_entry[0]:
+            self.tt[tt_key] = (depth, flag, value, best_col)
+
+        if tree_node is not None:
+            tree_node.value = value
+            tree_node.alpha = alpha
+            tree_node.beta = beta
+
+        return value, best_col
+
+    def _minimax_plain(
+        self,
+        board: Connect4Board,
+        depth: int,
+        maximizing: bool,
+        record_tree: bool,
+        tree_depth_left: int,
+        tree_node: Optional[TreeNode] = None,
+    ) -> Tuple[float, Optional[int]]:
         self.nodes_expanded += 1
 
-        # 1. Terminal state (full board): exact score difference
         if board.is_full():
-            ai_fours = board.count_fours(self.ai_player)
-            opp_fours = board.count_fours(self.opp_player)
-            terminal_val = (ai_fours - opp_fours) * self.TERMINAL_SCORE_SCALE
-            node = (
-                TreeNode(
-                    node_type="TERMINAL",
-                    col=move_col,
-                    depth=depth,
-                    value=terminal_val,
-                    heuristic_value=terminal_val,
-                    alpha=alpha,
-                    beta=beta,
-                )
-                if record_tree
-                else None
+            score = BoardEvaluator.W_FOUR * (
+                board.count_fours(self.ai_player) - board.count_fours(self.opp_player)
             )
-            return terminal_val, node
+            if tree_node is not None:
+                tree_node.node_type = "TERMINAL"
+                tree_node.value = score
+            return score, None
 
-        # 2. Depth cutoff (K levels reached): evaluate with heuristic
         if depth == 0:
-            h_val = self.evaluator.evaluate(board)
-            node = (
-                TreeNode(
-                    node_type="LEAF",
-                    col=move_col,
-                    depth=0,
-                    value=h_val,
-                    heuristic_value=h_val,
-                    alpha=alpha,
-                    beta=beta,
-                )
-                if record_tree
-                else None
-            )
-            return h_val, node
+            score = self.evaluator.evaluate(board)
+            if tree_node is not None:
+                tree_node.node_type = "LEAF"
+                tree_node.heuristic_value = score
+                tree_node.value = score
+            return score, None
 
-        valid_cols = board.get_available_cols(center_first=self.use_alpha_beta)
-        node = (
-            TreeNode(
-                node_type="MAX" if is_maximizing else "MIN",
-                col=move_col,
-                depth=depth,
-                alpha=alpha,
-                beta=beta,
-            )
-            if record_tree
-            else None
-        )
+        cols = board.get_available_cols(center_first=False)
+        best_col = cols[0]
+        record_children = record_tree and tree_node is not None and tree_depth_left > 0
 
-        if is_maximizing:
-            best_val = -math.inf
-            for idx, col in enumerate(valid_cols):
+        if maximizing:
+            value = -math.inf
+            for col in cols:
                 board.drop_disc(col, self.ai_player)
-                val, child = self._search(
-                    board, depth - 1, False, alpha, beta, col, record_tree
+                child_node = None
+                if record_children:
+                    child_node = TreeNode(
+                        node_type="MIN", col=col, depth=tree_node.depth + 1
+                    )
+                    tree_node.children.append(child_node)
+
+                child_val, _ = self._minimax_plain(
+                    board=board,
+                    depth=depth - 1,
+                    maximizing=False,
+                    record_tree=record_children,
+                    tree_depth_left=tree_depth_left - 1,
+                    tree_node=child_node,
                 )
                 board.undo_move()
 
-                if record_tree and node is not None and child is not None:
-                    node.children.append(child)
-
-                if val > best_val:
-                    best_val = val
-
-                if self.use_alpha_beta:
-                    alpha = max(alpha, best_val)
-                    if beta <= alpha:
-                        remaining = valid_cols[idx + 1 :]
-                        self.pruned_branches += len(remaining)
-                        if record_tree and node is not None:
-                            for pruned_col in remaining:
-                                node.children.append(
-                                    TreeNode(
-                                        node_type="PRUNED",
-                                        col=pruned_col,
-                                        depth=depth - 1,
-                                        alpha=alpha,
-                                        beta=beta,
-                                        pruned=True,
-                                    )
-                                )
-                        break
-
-            if node is not None:
-                node.value = best_val
-                node.alpha = alpha
-                node.beta = beta
-            return best_val, node
-
+                if child_val > value:
+                    value = child_val
+                    best_col = col
         else:
-            best_val = math.inf
-            for idx, col in enumerate(valid_cols):
+            value = math.inf
+            for col in cols:
                 board.drop_disc(col, self.opp_player)
-                val, child = self._search(
-                    board, depth - 1, True, alpha, beta, col, record_tree
+                child_node = None
+                if record_children:
+                    child_node = TreeNode(
+                        node_type="MAX", col=col, depth=tree_node.depth + 1
+                    )
+                    tree_node.children.append(child_node)
+
+                child_val, _ = self._minimax_plain(
+                    board=board,
+                    depth=depth - 1,
+                    maximizing=True,
+                    record_tree=record_children,
+                    tree_depth_left=tree_depth_left - 1,
+                    tree_node=child_node,
                 )
                 board.undo_move()
 
-                if record_tree and node is not None and child is not None:
-                    node.children.append(child)
+                if child_val < value:
+                    value = child_val
+                    best_col = col
 
-                if val < best_val:
-                    best_val = val
+        if tree_node is not None:
+            tree_node.value = value
 
-                if self.use_alpha_beta:
-                    beta = min(beta, best_val)
-                    if beta <= alpha:
-                        remaining = valid_cols[idx + 1 :]
-                        self.pruned_branches += len(remaining)
-                        if record_tree and node is not None:
-                            for pruned_col in remaining:
-                                node.children.append(
-                                    TreeNode(
-                                        node_type="PRUNED",
-                                        col=pruned_col,
-                                        depth=depth - 1,
-                                        alpha=alpha,
-                                        beta=beta,
-                                        pruned=True,
-                                    )
-                                )
-                        break
+        return value, best_col
 
-            if node is not None:
-                node.value = best_val
-                node.alpha = alpha
-                node.beta = beta
-            return best_val, node
+
+MinimaxAgent = MinimaxEngine

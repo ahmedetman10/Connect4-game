@@ -296,7 +296,7 @@ async function handleColumnClick(col) {
 
     if (state.gameOver) {
       setTurnUI("over");
-      showGameOverBanner(data.winner, data.human_score, data.ai_score);
+      showGameOverBanner(data.winner, data.human_score, data.ai_score, data.winning_lines);
     } else {
       setTurnUI("human");
     }
@@ -487,11 +487,12 @@ function updateHeuristicUI(breakdown) {
   dom.hbPositional.textContent = formatSigned(breakdown.positional_control ?? 0);
 }
 
-function showGameOverBanner(winner, humanScore, aiScore) {
-  if (winner === "Human") {
+function showGameOverBanner(winner, humanScore, aiScore, winningLines) {
+  const w = String(winner || "").toLowerCase();
+  if (w === "human") {
     dom.winnerIcon.textContent = "🏆";
     dom.winnerTitle.textContent = "You Beat the AI!";
-  } else if (winner === "AI") {
+  } else if (w === "ai") {
     dom.winnerIcon.textContent = "🤖";
     dom.winnerTitle.textContent = "AI Agent Wins!";
   } else {
@@ -499,9 +500,103 @@ function showGameOverBanner(winner, humanScore, aiScore) {
     dom.winnerTitle.textContent = "It's a Draw!";
   }
   dom.winnerSubtitle.textContent = `Final Connected-Fours — You: ${humanScore} | AI: ${aiScore}`;
+
+  // Add "Inspect Board" button once next to "Play Again"
+  if (!document.getElementById("btn-inspect-board")) {
+    const inspectBtn = document.createElement("button");
+    inspectBtn.id = "btn-inspect-board";
+    inspectBtn.textContent = "Inspect Board";
+    inspectBtn.style.cssText =
+      "margin-left: 10px; padding: 10px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; font-weight: 600;";
+    inspectBtn.addEventListener("click", () => {
+      dom.gameoverOverlay.classList.add("hidden");
+    });
+    dom.btnPlayAgain.insertAdjacentElement("afterend", inspectBtn);
+  }
+
+  if (winningLines) {
+    renderWinningLinesInspector(winningLines);
+  }
+
   dom.gameoverOverlay.classList.remove("hidden");
 }
 
+function highlightCells(cells, color) {
+  const allCells = dom.boardGrid.querySelectorAll(".cell");
+  if (!cells) {
+    allCells.forEach((el) => {
+      el.style.outline = "";
+      el.style.boxShadow = "";
+      el.style.opacity = "";
+      el.style.transform = "";
+    });
+    return;
+  }
+
+  const keySet = new Set(cells.map((c) => `${c.row},${c.col}`));
+  allCells.forEach((el) => {
+    const key = `${el.dataset.row},${el.dataset.col}`;
+    if (keySet.has(key)) {
+      el.style.outline = `3px solid ${color}`;
+      el.style.boxShadow = `0 0 14px ${color}`;
+      el.style.opacity = "1";
+      el.style.transform = "scale(1.06)";
+    } else {
+      el.style.outline = "";
+      el.style.boxShadow = "";
+      el.style.opacity = "0.35";
+      el.style.transform = "";
+    }
+  });
+}
+
+function renderWinningLinesInspector(winningLines) {
+  const box = document.createElement("div");
+  box.style.cssText =
+    "padding: 12px; margin-bottom: 12px; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);";
+
+  const title = document.createElement("div");
+  title.textContent = "Final Connect-4 Breakdown (Hover any line to highlight on board)";
+  title.style.cssText = "font-weight: 700; margin-bottom: 8px; font-size: 13px; color: #fff;";
+  box.appendChild(title);
+
+  const buildGroup = (label, list, color) => {
+    const header = document.createElement("div");
+    header.textContent = `${label} (${list.length})`;
+    header.style.cssText = `font-weight: 600; font-size: 12px; margin: 6px 0 4px; color: ${color};`;
+    box.appendChild(header);
+
+    if (list.length === 0) {
+      const empty = document.createElement("div");
+      empty.textContent = "None";
+      empty.style.cssText = "font-size: 12px; opacity: 0.6; margin-bottom: 4px;";
+      box.appendChild(empty);
+      return;
+    }
+
+    list.forEach((item, idx) => {
+      const row = document.createElement("div");
+      const coordsText = item.cells.map((c) => `(${c.row},${c.col})`).join(" → ");
+      row.textContent = `#${idx + 1} [${item.direction}]: ${coordsText}`;
+      row.style.cssText =
+        "font-size: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer; margin-bottom: 3px; background: rgba(255,255,255,0.04);";
+      row.addEventListener("mouseenter", () => {
+        row.style.background = "rgba(255,255,255,0.14)";
+        highlightCells(item.cells, color);
+      });
+      row.addEventListener("mouseleave", () => {
+        row.style.background = "rgba(255,255,255,0.04)";
+        highlightCells(null);
+      });
+      box.appendChild(row);
+    });
+  };
+
+  buildGroup("YOU (Human)", winningLines.human || [], "#ff4d6d");
+  buildGroup("AI AGENT", winningLines.ai || [], "#ffd166");
+
+  dom.treeContainer.prepend(box);
+}
 /* =========================================================
    Lazy / Collapsible Minimax Tree Renderer (Zero-Lag at High K)
    ========================================================= */

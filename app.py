@@ -218,6 +218,10 @@ def make_move():
             "nodes_expanded": agent.nodes_expanded,
             "pruned_branches": agent.pruned_branches,
             "minimax_tree": agent.last_tree.to_dict() if (include_tree and agent.last_tree) else None,
+            "winning_lines": {
+                "human": board.get_fours_coords(HUMAN),
+                "ai": board.get_fours_coords(AI),
+            },
         }
     )
 
